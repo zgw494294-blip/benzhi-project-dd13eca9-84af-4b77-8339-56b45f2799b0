@@ -113,7 +113,7 @@ func Load(path string) (Ledger, error) {
 }
 
 func Save(path string, loaded Ledger) error {
-	return saveWithFileSystem(path, loaded, osFileSystem{})
+	return saveWithConcurrencyControl(path, loaded, osFileSystem{})
 }
 
 type tempFile interface {
@@ -145,6 +145,82 @@ func (osFileSystem) Rename(oldPath, newPath string) error {
 
 func (osFileSystem) Remove(name string) error {
 	return os.Remove(name)
+}
+
+// saveWithConcurrencyControl serializes concurrent saves against the same
+// ledger file, re-reads the on-disk ledger while still holding the lock, and
+// merges any concurrent updates so neither concurrent record is lost. This
+// makes the read-modify-write performed by a CLI process atomic across
+// processes: between the time one process loaded the ledger and the time it
+// saves, another process may have committed additional outcomes, and those
+// outcomes are merged into the saved result.
+func saveWithConcurrencyControl(path string, loaded Ledger, fs fileSystem) (saveErr error) {
+	if path == "" {
+		return errors.New("ledger path is required")
+	}
+	if err := loaded.Validate(); err != nil {
+		return fmt.Errorf("validate ledger before save: %w", err)
+	}
+
+	unlock, err := lockLedger(path)
+	if err != nil {
+		return fmt.Errorf("lock ledger %q: %w", path, err)
+	}
+	defer func() {
+		if unlockErr := unlock(); unlockErr != nil && saveErr == nil {
+			saveErr = unlockErr
+		}
+	}()
+
+	merged := loaded
+	if existing, err := loadForMerge(path); err == nil {
+		merged = mergeLedgers(loaded, existing)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("re-read ledger %q: %w", path, err)
+	}
+
+	return saveWithFileSystem(path, merged, fs)
+}
+
+func loadForMerge(path string) (Ledger, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Ledger{}, err
+	}
+	var loaded Ledger
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		return Ledger{}, fmt.Errorf("decode ledger %q: %w", path, err)
+	}
+	if loaded.Rounds == nil {
+		loaded.Rounds = make(map[string]round.Round)
+	}
+	if err := loaded.Validate(); err != nil {
+		return Ledger{}, fmt.Errorf("validate ledger %q: %w", path, err)
+	}
+	return loaded, nil
+}
+
+// mergeLedgers combines a pending ledger with the current on-disk state so
+// concurrent updates from other processes are preserved. Rounds present only
+// on disk are retained unchanged; rounds present in both are merged at the
+// round level so concurrent outcomes for different doses are all kept.
+func mergeLedgers(pending, current Ledger) Ledger {
+	merged := pending
+	if merged.Version == 0 {
+		merged.Version = CurrentVersion
+	}
+	if merged.Rounds == nil {
+		merged.Rounds = make(map[string]round.Round)
+	}
+	for id, currentRound := range current.Rounds {
+		pendingRound, exists := merged.Rounds[id]
+		if !exists {
+			merged.Rounds[id] = currentRound.Copy()
+			continue
+		}
+		merged.Rounds[id] = pendingRound.Merge(currentRound)
+	}
+	return merged
 }
 
 func saveWithFileSystem(path string, loaded Ledger, fs fileSystem) (saveErr error) {

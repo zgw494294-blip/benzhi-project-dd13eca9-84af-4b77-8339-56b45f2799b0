@@ -233,6 +233,30 @@ func (r *Round) Close(closedAt time.Time) (Report, error) {
 	return copyReport(report), nil
 }
 
+// Merge returns a copy of r combined with other so that concurrent updates to
+// the same round are not silently lost. A closed round is preferred over an
+// active one, which preserves a concurrent close. When both rounds are active,
+// outcomes from other that r does not already record are added; existing
+// outcomes are kept unchanged.
+func (r Round) Merge(other Round) Round {
+	if r.Status == StatusClosed {
+		return r.Copy()
+	}
+	if other.Status == StatusClosed {
+		return other.Copy()
+	}
+	merged := r.Copy()
+	if merged.Outcomes == nil {
+		merged.Outcomes = make(map[string]Outcome)
+	}
+	for doseID, outcome := range other.Outcomes {
+		if _, exists := merged.Outcomes[doseID]; !exists {
+			merged.Outcomes[doseID] = copyOutcome(outcome)
+		}
+	}
+	return merged
+}
+
 func (r Round) Report() (Report, error) {
 	if r.Status != StatusClosed || r.ClosedReport == nil {
 		return Report{}, ErrReportUnavailable
