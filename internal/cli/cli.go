@@ -105,6 +105,8 @@ func runRecord(args []string, output io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("record does not accept positional arguments")
 	}
+	normalizedDoseID := strings.TrimSpace(*doseID)
+	normalizedRoundID := strings.TrimSpace(*roundID)
 	var noteValue *string
 	if wasProvided(flags, "note") {
 		noteValue = copyString(note)
@@ -113,14 +115,14 @@ func runRecord(args []string, output io.Writer) error {
 	if wasProvided(flags, "reason") {
 		reasonValue = copyString(reason)
 	}
-	newOutcome := round.Outcome{DoseID: *doseID, Kind: round.OutcomeKind(*kind), Note: noteValue, SkipReason: reasonValue}
+	newOutcome := round.Outcome{DoseID: normalizedDoseID, Kind: round.OutcomeKind(*kind), Note: noteValue, SkipReason: reasonValue}
 	loaded, err := ledger.Load(*path)
 	if err != nil {
 		return err
 	}
-	storedRound, exists := loaded.Get(*roundID)
+	storedRound, exists := loaded.Get(normalizedRoundID)
 	if !exists {
-		return fmt.Errorf("round ID %q was not found", *roundID)
+		return fmt.Errorf("round ID %q was not found", normalizedRoundID)
 	}
 	if err := storedRound.Record(newOutcome); err != nil {
 		return err
@@ -131,7 +133,7 @@ func runRecord(args []string, output io.Writer) error {
 	if err := ledger.Save(*path, loaded); err != nil {
 		return err
 	}
-	return writeJSON(output, map[string]any{"outcome": newOutcome, "round_id": *roundID})
+	return writeJSON(output, map[string]any{"outcome": newOutcome, "round_id": normalizedRoundID})
 }
 
 func runClose(args []string, output io.Writer) error {
