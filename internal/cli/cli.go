@@ -114,6 +114,7 @@ func runRecord(args []string, output io.Writer) error {
 		reasonValue = copyString(reason)
 	}
 	newOutcome := round.Outcome{DoseID: *doseID, Kind: round.OutcomeKind(*kind), Note: noteValue, SkipReason: reasonValue}
+	newOutcome.DoseID = strings.TrimSpace(newOutcome.DoseID)
 	loaded, err := ledger.Load(*path)
 	if err != nil {
 		return err
