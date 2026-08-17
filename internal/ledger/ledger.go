@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"syscall"
 
 	"doseledger/internal/round"
 )
@@ -14,12 +16,17 @@ import (
 const CurrentVersion = 1
 
 type Ledger struct {
-	Version int                    `json:"version"`
-	Rounds  map[string]round.Round `json:"rounds"`
+	Version         int                    `json:"version"`
+	Rounds          map[string]round.Round `json:"rounds"`
+	baselineVersion int
+	baselineRounds  map[string]round.Round
+	hasBaseline     bool
 }
 
 func New() Ledger {
-	return Ledger{Version: CurrentVersion, Rounds: make(map[string]round.Round)}
+	loaded := Ledger{Version: CurrentVersion, Rounds: make(map[string]round.Round)}
+	loaded.captureBaseline()
+	return loaded
 }
 
 func (l Ledger) Validate() error {
@@ -109,11 +116,204 @@ func Load(path string) (Ledger, error) {
 	if err := loaded.Validate(); err != nil {
 		return Ledger{}, fmt.Errorf("validate ledger %q: %w", path, err)
 	}
+	loaded.captureBaseline()
 	return loaded, nil
 }
 
-func Save(path string, loaded Ledger) error {
-	return saveWithFileSystem(path, loaded, osFileSystem{})
+func Save(path string, loaded Ledger) (saveErr error) {
+	if path == "" {
+		return errors.New("ledger path is required")
+	}
+	if err := loaded.Validate(); err != nil {
+		return fmt.Errorf("validate ledger before save: %w", err)
+	}
+	lock, err := acquireLock(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := lock.release(); err != nil {
+			saveErr = errors.Join(saveErr, err)
+		}
+	}()
+
+	current, err := Load(path)
+	if err != nil {
+		return err
+	}
+	merged, err := mergeLedgers(current, loaded)
+	if err != nil {
+		return err
+	}
+	return saveWithFileSystem(path, merged, osFileSystem{})
+}
+
+func (l *Ledger) captureBaseline() {
+	l.baselineVersion = l.Version
+	l.baselineRounds = copyRounds(l.Rounds)
+	l.hasBaseline = true
+}
+
+func copyRounds(source map[string]round.Round) map[string]round.Round {
+	copied := make(map[string]round.Round, len(source))
+	for id, storedRound := range source {
+		copied[id] = storedRound.Copy()
+	}
+	return copied
+}
+
+func mergeLedgers(current, desired Ledger) (Ledger, error) {
+	if !desired.hasBaseline {
+		return desired, nil
+	}
+	if desired.baselineVersion != current.Version {
+		return Ledger{}, fmt.Errorf("ledger changed from version %d to %d", desired.baselineVersion, current.Version)
+	}
+
+	merged := Ledger{Version: current.Version, Rounds: copyRounds(current.Rounds)}
+	for id, baselineRound := range desired.baselineRounds {
+		if _, exists := desired.Rounds[id]; exists {
+			continue
+		}
+		currentRound, exists := current.Rounds[id]
+		if !exists {
+			continue
+		}
+		if !reflect.DeepEqual(currentRound, baselineRound) {
+			return Ledger{}, fmt.Errorf("round %q changed concurrently", id)
+		}
+		delete(merged.Rounds, id)
+	}
+
+	for id, desiredRound := range desired.Rounds {
+		baselineRound, existedAtLoad := desired.baselineRounds[id]
+		if existedAtLoad && reflect.DeepEqual(desiredRound, baselineRound) {
+			continue
+		}
+		currentRound, exists := current.Rounds[id]
+		if !existedAtLoad {
+			if exists && !reflect.DeepEqual(currentRound, desiredRound) {
+				return Ledger{}, fmt.Errorf("round %q was added concurrently", id)
+			}
+			if !exists {
+				merged.Rounds[id] = desiredRound.Copy()
+			}
+			continue
+		}
+		if !exists {
+			return Ledger{}, fmt.Errorf("round %q was removed concurrently", id)
+		}
+		mergedRound, err := mergeRound(baselineRound, desiredRound, currentRound)
+		if err != nil {
+			return Ledger{}, fmt.Errorf("round %q: %w", id, err)
+		}
+		merged.Rounds[id] = mergedRound
+	}
+	return merged, nil
+}
+
+func mergeRound(baseline, desired, current round.Round) (round.Round, error) {
+	desired = desired.Copy()
+	current = current.Copy()
+	merged := current.Copy()
+	var err error
+	if merged.ID, err = mergeValue("ID", baseline.ID, desired.ID, current.ID); err != nil {
+		return round.Round{}, err
+	}
+	if merged.PatientLabel, err = mergeValue("patient label", baseline.PatientLabel, desired.PatientLabel, current.PatientLabel); err != nil {
+		return round.Round{}, err
+	}
+	if merged.ScheduledDoses, err = mergeValue("scheduled doses", baseline.ScheduledDoses, desired.ScheduledDoses, current.ScheduledDoses); err != nil {
+		return round.Round{}, err
+	}
+	if merged.Status, err = mergeValue("status", baseline.Status, desired.Status, current.Status); err != nil {
+		return round.Round{}, err
+	}
+	if merged.ClosedReport, err = mergeValue("closed report", baseline.ClosedReport, desired.ClosedReport, current.ClosedReport); err != nil {
+		return round.Round{}, err
+	}
+
+	touchedOutcomes := make(map[string]struct{}, len(baseline.Outcomes)+len(desired.Outcomes))
+	for doseID := range baseline.Outcomes {
+		touchedOutcomes[doseID] = struct{}{}
+	}
+	for doseID := range desired.Outcomes {
+		touchedOutcomes[doseID] = struct{}{}
+	}
+	for doseID := range touchedOutcomes {
+		baselineOutcome, existedAtLoad := baseline.Outcomes[doseID]
+		desiredOutcome, existsInDesired := desired.Outcomes[doseID]
+		if sameOutcomeState(baselineOutcome, existedAtLoad, desiredOutcome, existsInDesired) {
+			continue
+		}
+		currentOutcome, existsInCurrent := current.Outcomes[doseID]
+		if sameOutcomeState(baselineOutcome, existedAtLoad, currentOutcome, existsInCurrent) {
+			if existsInDesired {
+				merged.Outcomes[doseID] = desiredOutcome
+			} else {
+				delete(merged.Outcomes, doseID)
+			}
+			continue
+		}
+		if !sameOutcomeState(desiredOutcome, existsInDesired, currentOutcome, existsInCurrent) {
+			return round.Round{}, fmt.Errorf("outcome for dose %q changed concurrently", doseID)
+		}
+	}
+	if err := merged.Validate(); err != nil {
+		return round.Round{}, err
+	}
+	return merged, nil
+}
+
+func mergeValue[T any](name string, baseline, desired, current T) (T, error) {
+	if reflect.DeepEqual(desired, baseline) || reflect.DeepEqual(desired, current) {
+		return current, nil
+	}
+	if reflect.DeepEqual(current, baseline) {
+		return desired, nil
+	}
+	var zero T
+	return zero, fmt.Errorf("%s changed concurrently", name)
+}
+
+func sameOutcomeState(left round.Outcome, leftExists bool, right round.Outcome, rightExists bool) bool {
+	return leftExists == rightExists && (!leftExists || reflect.DeepEqual(left, right))
+}
+
+type ledgerLock struct {
+	file *os.File
+}
+
+func acquireLock(path string) (*ledgerLock, error) {
+	directory := filepath.Dir(path)
+	lockPath := filepath.Join(directory, "."+filepath.Base(path)+".lock")
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("open ledger lock %q: %w", lockPath, err)
+	}
+	for {
+		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX)
+		if !errors.Is(err, syscall.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("lock ledger %q: %w", path, err)
+	}
+	return &ledgerLock{file: file}, nil
+}
+
+func (lock *ledgerLock) release() error {
+	unlockErr := syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN)
+	closeErr := lock.file.Close()
+	if unlockErr != nil {
+		unlockErr = fmt.Errorf("unlock ledger: %w", unlockErr)
+	}
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close ledger lock: %w", closeErr)
+	}
+	return errors.Join(unlockErr, closeErr)
 }
 
 type tempFile interface {
