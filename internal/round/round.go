@@ -130,6 +130,9 @@ func (r Round) Validate() error {
 		if strings.TrimSpace(dose.ID) == "" {
 			return fmt.Errorf("%w: scheduled dose has an empty ID", ErrInvalidRound)
 		}
+		if dose.ID != strings.TrimSpace(dose.ID) {
+			return fmt.Errorf("%w: scheduled dose ID %q has surrounding whitespace", ErrInvalidRound, dose.ID)
+		}
 		if _, exists := seen[dose.ID]; exists {
 			return fmt.Errorf("%w: %q", ErrDuplicateDose, dose.ID)
 		}
