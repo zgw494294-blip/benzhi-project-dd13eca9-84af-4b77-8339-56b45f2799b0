@@ -88,6 +88,9 @@ func Open(id, patientLabel string, doses []Dose) (Round, error) {
 		if dose.ID == "" {
 			return Round{}, fmt.Errorf("%w: dose %d has an empty ID", ErrInvalidRound, i+1)
 		}
+		if strings.TrimSpace(dose.Medication) == "" {
+			return Round{}, fmt.Errorf("%w: dose %d has a blank medication", ErrInvalidRound, i+1)
+		}
 		if _, exists := seen[dose.ID]; exists {
 			return Round{}, fmt.Errorf("%w: %q", ErrDuplicateDose, dose.ID)
 		}

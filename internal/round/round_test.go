@@ -10,7 +10,7 @@ func TestOpenRejectsInvalidDoseCollectionsWithoutSharingThem(t *testing.T) {
 	if _, err := Open("r-1", "Patient", nil); !errors.Is(err, ErrInvalidRound) {
 		t.Fatalf("Open(nil) error = %v, want invalid round", err)
 	}
-	if _, err := Open("r-1", "Patient", []Dose{{ID: "dose-1"}, {ID: "dose-1"}}); !errors.Is(err, ErrDuplicateDose) {
+	if _, err := Open("r-1", "Patient", []Dose{{ID: "dose-1", Medication: "ointment"}, {ID: "dose-1", Medication: "ointment"}}); !errors.Is(err, ErrDuplicateDose) {
 		t.Fatalf("duplicate dose error = %v, want duplicate dose", err)
 	}
 
@@ -27,7 +27,7 @@ func TestOpenRejectsInvalidDoseCollectionsWithoutSharingThem(t *testing.T) {
 }
 
 func TestRecordPreservesOptionalValuesAndLeavesUnknownAttemptsAlone(t *testing.T) {
-	opened, err := Open("r-1", "Patient", []Dose{{ID: "dose-1"}, {ID: "dose-2"}, {ID: "dose-3"}})
+	opened, err := Open("r-1", "Patient", []Dose{{ID: "dose-1", Medication: "ointment"}, {ID: "dose-2", Medication: "tablet"}, {ID: "dose-3", Medication: "drops"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestRecordPreservesOptionalValuesAndLeavesUnknownAttemptsAlone(t *testing.T
 }
 
 func TestCloseDerivesOneWayReports(t *testing.T) {
-	opened, err := Open("r-1", "Patient", []Dose{{ID: "dose-1"}, {ID: "dose-2"}})
+	opened, err := Open("r-1", "Patient", []Dose{{ID: "dose-1", Medication: "ointment"}, {ID: "dose-2", Medication: "tablet"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestCloseDerivesOneWayReports(t *testing.T) {
 }
 
 func TestCloseAllAdministeredProducesCompleteReport(t *testing.T) {
-	opened, err := Open("r-complete", "Patient", []Dose{{ID: "dose-1"}, {ID: "dose-2"}})
+	opened, err := Open("r-complete", "Patient", []Dose{{ID: "dose-1", Medication: "ointment"}, {ID: "dose-2", Medication: "tablet"}})
 	if err != nil {
 		t.Fatal(err)
 	}

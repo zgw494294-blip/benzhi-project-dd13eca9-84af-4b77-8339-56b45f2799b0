@@ -14,7 +14,7 @@ import (
 
 func TestSaveAndLoadRoundTripPreservesOptionalPointers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ledger.json")
-	storedRound, err := round.Open("r-1", "Patient", []round.Dose{{ID: "dose-1"}, {ID: "dose-2"}})
+	storedRound, err := round.Open("r-1", "Patient", []round.Dose{{ID: "dose-1", Medication: "ointment"}, {ID: "dose-2", Medication: "tablet"}})
 	if err != nil {
 		t.Fatal(err)
 	}
