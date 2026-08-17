@@ -271,8 +271,8 @@ func validateReport(report Report, r Round) error {
 	}
 	skipped := 0
 	for i, dose := range report.Doses {
-		if dose.ID != r.ScheduledDoses[i].ID {
-			return fmt.Errorf("%w: report dose order does not match round", ErrInvalidRound)
+		if dose != r.ScheduledDoses[i] {
+			return fmt.Errorf("%w: report dose does not match round", ErrInvalidRound)
 		}
 		outcome := report.Outcomes[i]
 		if outcome.DoseID != dose.ID {
